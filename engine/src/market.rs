@@ -526,7 +526,8 @@ impl Market {
     #[cfg(not(any(test, debug_assertions)))]
     pub(crate) fn debug_check(&self) {}
 
-    #[cfg(any(test, debug_assertions))]
+    /// Always compiled so tests can check invariants in any build profile (including
+    /// `cargo test --release`). `debug_check` below is what the engine calls on every command.
     pub(crate) fn check_invariants(&self) {
         if let (Some(bid), Some(ask)) = (self.best_bid(), self.best_ask()) {
             assert!(bid < ask, "book is crossed: bid {bid:?}, ask {ask:?}");

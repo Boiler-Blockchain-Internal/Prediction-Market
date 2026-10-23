@@ -100,6 +100,17 @@ impl Engine {
         self.markets.get(&market).map(Market::snapshot)
     }
 
+    /// Asserts every structural invariant of every market (book never crossed, level totals
+    /// match their orders, order index and queues agree, and so on). Panics on a violation.
+    ///
+    /// Unlike the internal per-command check, this is compiled in every build profile, so
+    /// tests do not silently lose their safety net under `--release`.
+    pub fn check_invariants(&self) {
+        for market in self.markets.values() {
+            market.check_invariants();
+        }
+    }
+
     fn emit(&mut self, market: MarketId, seq: Seq, kinds: Vec<EventKind>) -> Vec<Event> {
         let book = self
             .markets

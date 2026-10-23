@@ -1,9 +1,13 @@
 use std::collections::BTreeMap;
 
 use boilermarket_engine::{
-    Action, Command, Engine, EventKind, MarketId, OrderId, Outcome, Seq, TimeInForce, UserId,
+    Action, Command, Engine, Event, EventKind, MarketId, OrderId, Outcome, RejectReason, Seq,
+    TimeInForce, UserId,
 };
 use proptest::prelude::*;
+
+#[path = "support/ops.rs"]
+mod ops;
 
 #[derive(Clone, Debug)]
 struct RawOrder {
@@ -100,5 +104,93 @@ proptest! {
         for (order, total) in traded {
             prop_assert!(total <= original[&order]);
         }
+    }
+}
+
+fn replay(commands: &[Command]) -> Vec<Event> {
+    let mut engine = Engine::new();
+    commands
+        .iter()
+        .cloned()
+        .enumerate()
+        .flat_map(|(i, command)| engine.apply(Seq::new(i as u64 + 1), command))
+        .collect()
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(1_000))]
+
+    /// Full command mix (place, cancel, lock, register, bad input, unknown markets) with the
+    /// structural invariants checked after every single command, plus the event contract:
+    /// per-market event numbers are consecutive, every accepted order ends the command in
+    /// exactly one closing event, and quantity is conserved.
+    #[test]
+    fn mixed_command_streams_hold_invariants_and_the_event_contract(
+        stream in ops::stream()
+    ) {
+        let commands = ops::commands(&stream);
+        let mut engine = Engine::new();
+        let mut all_events = Vec::new();
+        let mut next_event_no = BTreeMap::<MarketId, u64>::new();
+        let mut original = BTreeMap::<OrderId, u64>::new();
+        let mut traded = BTreeMap::<OrderId, u64>::new();
+
+        for (index, command) in commands.iter().cloned().enumerate() {
+            let seq = Seq::new(index as u64 + 1);
+            let events = engine.apply(seq, command);
+            engine.check_invariants();
+
+            prop_assert!(!events.is_empty(), "every command produces at least one event");
+
+            for event in &events {
+                prop_assert_eq!(event.seq, seq);
+                if event.event_no.get() == 0 {
+                    // Event number zero is reserved for rejections about unknown markets.
+                    let is_unknown_market_reject = matches!(
+                        event.kind,
+                        EventKind::OrderRejected { reason: RejectReason::UnknownMarket, .. }
+                    );
+                    prop_assert!(is_unknown_market_reject, "event_no 0 on {:?}", event.kind);
+                    prop_assert!(engine.book_snapshot(event.market).is_none());
+                } else {
+                    let expected = next_event_no.entry(event.market).or_insert(1);
+                    prop_assert_eq!(event.event_no.get(), *expected);
+                    *expected += 1;
+                }
+
+                match event.kind {
+                    EventKind::OrderAccepted { order, qty, .. } => {
+                        original.insert(order, qty.get());
+                    }
+                    EventKind::TradeExecuted { maker, taker, qty, .. } => {
+                        *traded.entry(maker).or_insert(0) += qty.get();
+                        *traded.entry(taker).or_insert(0) += qty.get();
+                    }
+                    _ => {}
+                }
+            }
+
+            // An accepted order is always closed out within the same command: it fills,
+            // rests, or expires, and that is the final event emitted.
+            if let EventKind::OrderAccepted { order, .. } = &events[0].kind {
+                let accepted = *order;
+                let closes_it = match &events[events.len() - 1].kind {
+                    EventKind::OrderFilled { order, .. }
+                    | EventKind::OrderRested { order, .. }
+                    | EventKind::OrderExpired { order, .. } => *order == accepted,
+                    _ => false,
+                };
+                prop_assert!(closes_it, "accepted order {:?} not closed by last event", accepted);
+            }
+
+            all_events.extend(events);
+        }
+
+        for (order, total) in traded {
+            prop_assert!(total <= original[&order], "order {:?} over-traded", order);
+        }
+
+        // Determinism: a fresh engine fed the same commands emits identical events.
+        prop_assert_eq!(all_events, replay(&commands));
     }
 }
