@@ -1,0 +1,12 @@
+[package]
+name = "boilermarket-engine"
+version = "0.1.0"
+edition = "2021"
+description = "Deterministic matching core for BoilerMarket"
+license = "MIT"
+
+[dependencies]
+
+[dev-dependencies]
+proptest = "1.6"
+
