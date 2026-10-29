@@ -43,6 +43,7 @@ struct RefMarket {
 #[derive(Default)]
 pub struct Reference {
     markets: BTreeMap<MarketId, RefMarket>,
+    last_seq: Option<Seq>,
 }
 
 fn reject(user: Option<UserId>, reason: RejectReason, order: Option<OrderId>) -> EventKind {
@@ -311,6 +312,22 @@ impl Reference {
     }
 
     pub fn apply(&mut self, seq: Seq, cmd: Command) -> Vec<Event> {
+        // Sequence numbers must strictly increase; a stale command changes nothing.
+        if self.last_seq.is_some_and(|last| seq <= last) {
+            let (user, order) = match cmd {
+                Command::PlaceOrder { user, .. } => (Some(user), None),
+                Command::CancelOrder { user, order, .. } => (Some(user), Some(order)),
+                Command::RegisterMarket { .. } | Command::LockMarket { .. } => (None, None),
+            };
+            return vec![Event {
+                market: cmd.market(),
+                seq,
+                event_no: EventNo::new(0),
+                kind: reject(user, RejectReason::StaleSeq, order),
+            }];
+        }
+        self.last_seq = Some(seq);
+
         match cmd {
             Command::RegisterMarket { market } => {
                 let kind = match self.markets.entry(market) {

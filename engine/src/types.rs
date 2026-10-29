@@ -118,6 +118,9 @@ pub enum CancelReason {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum RejectReason {
+    /// The command's `seq` was not strictly greater than the last one the engine applied.
+    /// Rejected before anything else is looked at, so no state changes.
+    StaleSeq,
     UnknownMarket,
     MarketAlreadyExists,
     MarketNotOpen,

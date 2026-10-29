@@ -145,13 +145,24 @@ proptest! {
             for event in &events {
                 prop_assert_eq!(event.seq, seq);
                 if event.event_no.get() == 0 {
-                    // Event number zero is reserved for rejections about unknown markets.
+                    // Event number zero is reserved for rejections that have no event stream
+                    // to advance: an unknown market, or a stale sequence number.
                     let is_unknown_market_reject = matches!(
                         event.kind,
                         EventKind::OrderRejected { reason: RejectReason::UnknownMarket, .. }
                     );
-                    prop_assert!(is_unknown_market_reject, "event_no 0 on {:?}", event.kind);
-                    prop_assert!(engine.book_snapshot(event.market).is_none());
+                    let is_stale_seq_reject = matches!(
+                        event.kind,
+                        EventKind::OrderRejected { reason: RejectReason::StaleSeq, .. }
+                    );
+                    prop_assert!(
+                        is_unknown_market_reject || is_stale_seq_reject,
+                        "event_no 0 on {:?}",
+                        event.kind
+                    );
+                    if is_unknown_market_reject {
+                        prop_assert!(engine.book_snapshot(event.market).is_none());
+                    }
                 } else {
                     let expected = next_event_no.entry(event.market).or_insert(1);
                     prop_assert_eq!(event.event_no.get(), *expected);

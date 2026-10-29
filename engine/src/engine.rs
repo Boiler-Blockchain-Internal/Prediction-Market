@@ -9,6 +9,9 @@ use crate::{
 #[derive(Clone, Debug, Default)]
 pub struct Engine {
     markets: BTreeMap<MarketId, Market>,
+    /// Highest `seq` applied so far. Order ids are derived from `seq`, so requiring `seq` to
+    /// strictly increase is what makes order ids unique and replays safe.
+    last_seq: Option<Seq>,
 }
 
 impl Engine {
@@ -16,7 +19,18 @@ impl Engine {
         Self::default()
     }
 
+    /// Applies one sequenced command and returns the events it produced.
+    ///
+    /// `seq` must be strictly greater than the `seq` of every command applied before. A
+    /// command that breaks this is rejected with [`RejectReason::StaleSeq`] (one event,
+    /// `event_no = 0`) and changes nothing, so a duplicated or replayed command cannot
+    /// corrupt state or create a second order with the same id.
     pub fn apply(&mut self, seq: Seq, cmd: Command) -> Vec<Event> {
+        if self.last_seq.is_some_and(|last| seq <= last) {
+            return vec![stale_seq_event(seq, &cmd)];
+        }
+        self.last_seq = Some(seq);
+
         match cmd {
             Command::RegisterMarket { market } => {
                 let kind = match self.markets.entry(market) {
@@ -125,6 +139,27 @@ impl Engine {
                 kind,
             })
             .collect()
+    }
+}
+
+fn stale_seq_event(seq: Seq, cmd: &Command) -> Event {
+    // Like an unknown market, a stale command has no event stream of its own to advance, so
+    // it uses the event number zero sentinel. `order` is left empty for a place command
+    // because the order id would be the stale `seq`, which may belong to a real live order.
+    let (user, order) = match *cmd {
+        Command::PlaceOrder { user, .. } => (Some(user), None),
+        Command::CancelOrder { user, order, .. } => (Some(user), Some(order)),
+        Command::RegisterMarket { .. } | Command::LockMarket { .. } => (None, None),
+    };
+    Event {
+        market: cmd.market(),
+        seq,
+        event_no: EventNo::new(0),
+        kind: EventKind::OrderRejected {
+            user,
+            reason: RejectReason::StaleSeq,
+            order,
+        },
     }
 }
 
