@@ -1,10 +1,10 @@
 # BoilerMarket
 
-BoilerMarket is a binary prediction market with a reputation layer, built by a Purdue student team. This repository currently contains the Phase 1 matching engine: a deterministic Rust library that accepts commands and returns an exact, reproducible event stream.
+BoilerMarket is a binary prediction market with a reputation layer, built by a Purdue student team. This repository contains the Phase 1 Rust matching engine and a Python reputation prototype. The `src/` Next.js app in this branch adds the initial wallet sign-in frontend.
 
 Users trade YES and NO shares on questions with binary outcomes. Prices range from 1 to 99 and represent the market's estimated probability. The beta uses play money only.
 
-## Phase 1 features
+## Phase 1 matching engine
 
 - One engine managing multiple markets
 - A single YES-priced order book per market, with NO orders translated at entry
@@ -22,14 +22,14 @@ The core performs no file, network, database, balance, settlement, or clock oper
 ## Project structure
 
 ```text
-engine/
-  src/       Matching engine implementation
-  tests/     Golden scenarios, determinism, and property tests
+engine/       Deterministic Rust matching engine and tests
+reputation/   Python reputation prototype, Supabase access, and migrations
+src/          Next.js wallet connection and authentication prototype
 ```
 
 ## Getting started
 
-Install the stable Rust toolchain, then run:
+For the Rust engine, install the stable Rust toolchain and run:
 
 ```bash
 cd engine
@@ -38,12 +38,22 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --all -- --check
 ```
 
-## Testing
+For the Next.js auth prototype:
 
-The test suite covers linked-list operations, price-time priority, YES/NO translation, partial and multi-level fills, IOC expiration, cancellation, self-trade prevention, market locking, rejection paths, event ordering, replay determinism, and quantity conservation.
+1. Install Node.js 20.9 or newer and pnpm.
+2. Run `pnpm install` from the repository root.
+3. Copy `.env.example` to `.env.local` and set `NEXT_PUBLIC_REOWN_PROJECT_ID`, `NEXT_PUBLIC_APP_URL`, `SUPABASE_URL`, and server-only `SUPABASE_SECRET_KEY`.
+4. Apply `reputation/migrations/002_wallet_auth.sql` to the same Supabase project used by the reputation prototype.
+5. Run `pnpm dev` and open `http://localhost:3000`.
 
-Property tests also run randomized command streams through the engine and check its invariants after every command.
+The auth prototype uses Reown AppKit/Wagmi and provisionally supports Sepolia. It issues and verifies SIWE messages, maps wallets to `public.users`, and stores hashed session IDs in Supabase behind an HttpOnly cookie. It does not send transactions. Confirm the product's target chain and add rate limiting, protected product actions, and ERC-1271 verification before production use.
+
+`NEXT_PUBLIC_APP_URL` must match the app's exact origin in each environment. The Reown project ID is public client configuration. Keep `SUPABASE_SECRET_KEY` server-only and never use a `NEXT_PUBLIC_` prefix for it.
+
+## Reputation prototype
+
+See [`reputation/README.md`](reputation/README.md) for setup and usage. The current reputation pipeline reads simulated trade data from Supabase and writes reputation snapshots.
 
 ## Current scope
 
-Phase 1 is the pure matching core. Persistence, networking, balances, positions, settlement, snapshots, Redis, Postgres, and on-chain reputation are intentionally outside this crate's current scope.
+The matching engine is a pure deterministic core. Networking, balances, positions, settlement, and integration between the web app, matching engine, and reputation service remain later phases.
