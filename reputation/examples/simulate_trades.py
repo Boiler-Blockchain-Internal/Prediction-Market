@@ -1,5 +1,11 @@
+
+from pathlib import Path
+import sys
 from positions import Trade, reconstruct_positions
 from scoring import score_closed_lots, brier_score, directional_correct
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 
 trades = [
     Trade('alice', 'election', 'YES', 'BUY', 40, 5),
