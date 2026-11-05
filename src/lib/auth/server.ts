@@ -3,16 +3,21 @@ import 'server-only'
 import { createHash, randomBytes } from 'node:crypto'
 import { cookies } from 'next/headers'
 import { createSiweMessage, parseSiweMessage, validateSiweMessage } from 'viem/siwe'
-import { getAddress, verifyMessage, type Address, type Hex } from 'viem'
+import { createPublicClient, getAddress, http, type Address, type Hex } from 'viem'
+import { sepolia } from 'viem/chains'
 
 const SESSION_TTL_SECONDS = 60 * 60 * 24 * 7
 const CHALLENGE_TTL_MS = 5 * 60 * 1000
-const SUPPORTED_CHAIN_ID = 11155111
+const SUPPORTED_CHAIN_ID = sepolia.id
 const SIGN_IN_STATEMENT = 'Sign in to BoilerMarket. This request will not submit a transaction.'
 const SESSION_COOKIE = process.env.NODE_ENV === 'production' ? '__Host-bm_session' : 'bm_session'
+const MAX_SIGNATURE_LENGTH = 20_002
 
 type UserRow = { id: number }
 type SessionRow = { wallet_address: string; expires_at: string }
+type AuthPublicClient = ReturnType<typeof createPublicClient>
+
+let cachedVerificationClient: AuthPublicClient | undefined
 
 function appOrigin() {
   const configuredUrl = process.env.NEXT_PUBLIC_APP_URL
@@ -29,6 +34,24 @@ function supabaseConfig() {
   const secretKey = process.env.SUPABASE_SECRET_KEY
   if (!url || !secretKey) throw new Error('SUPABASE_URL and SUPABASE_SECRET_KEY are required for wallet authentication.')
   return { url: url.replace(/\/+$/, ''), secretKey }
+}
+
+function getVerificationClient() {
+  if (cachedVerificationClient) return cachedVerificationClient
+
+  const rpcUrl = process.env.SEPOLIA_RPC_URL
+  if (!rpcUrl) throw new Error('SEPOLIA_RPC_URL is required to verify wallet signatures.')
+
+  const parsedRpcUrl = new URL(rpcUrl)
+  if (parsedRpcUrl.protocol !== 'https:' && !(process.env.NODE_ENV !== 'production' && parsedRpcUrl.protocol === 'http:')) {
+    throw new Error('SEPOLIA_RPC_URL must use HTTPS outside local development.')
+  }
+
+  cachedVerificationClient = createPublicClient({
+    chain: sepolia,
+    transport: http(rpcUrl),
+  })
+  return cachedVerificationClient
 }
 
 async function supabaseRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -123,12 +146,30 @@ export async function verifySiweLogin(message: string, signature: string) {
     nonce: fields.nonce,
     time: new Date(),
   })
-  if (!isValidMessage || !(await consumeChallenge(fields.nonce, address, fields.chainId))) {
+  if (!isValidMessage) throw new Error('The sign-in message is invalid or expired. Please try again.')
+  if (
+    signature.length > MAX_SIGNATURE_LENGTH ||
+    !/^0x(?:[0-9a-fA-F]{2})+$/.test(signature)
+  ) {
+    throw new Error('Invalid wallet signature.')
+  }
+
+  let validSignature: boolean
+  try {
+    // The public-client action checks both EOA signatures and deployed contract
+    // wallets through ERC-1271 on the SIWE message's supported chain.
+    validSignature = await getVerificationClient().verifyMessage({
+      address,
+      message,
+      signature: signature as Hex,
+    })
+  } catch {
+    throw new Error('Could not verify the wallet signature on Sepolia. Please try again.')
+  }
+  if (!validSignature) throw new Error('The wallet signature could not be verified.')
+  if (!(await consumeChallenge(fields.nonce, address, fields.chainId))) {
     throw new Error('This sign-in request expired or was already used. Please try again.')
   }
-  if (!/^0x[0-9a-fA-F]{130}$/.test(signature)) throw new Error('Invalid wallet signature.')
-  const validSignature = await verifyMessage({ address, message, signature: signature as Hex })
-  if (!validSignature) throw new Error('The wallet signature could not be verified.')
   return address
 }
 

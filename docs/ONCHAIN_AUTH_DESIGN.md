@@ -1,12 +1,12 @@
 # BoilerMarket Onchain Authentication Design
 
 **Owner:** Adi
-**Status:** Initial SIWE flow implemented with Supabase persistence; production hardening remains
+**Status:** SIWE, EOA/ERC-1271 verification, and Supabase sessions implemented for provisional Sepolia; production hardening remains
 **Scope:** WalletConnect integration and wallet-based sign-in for the BoilerMarket Next.js application
 
 ## 1. Purpose
 
-This document describes how BoilerMarket will let a user connect an EVM wallet and authenticate with it. It covers the initial implementation design; it does not implement the integration.
+This document describes the wallet-authentication design and tracks its implementation and rollout.
 
 The project plan describes BoilerMarket as a social forecasting platform. Users create profiles and predictions, predictions have deadlines and resolution rules, and user reputation is based on forecasting performance. The first version is explicitly not intended to involve real-money wagering. Onchain authentication should therefore establish a user identity for the application without requesting an onchain transaction.
 
@@ -62,8 +62,8 @@ sequenceDiagram
     User->>Wallet: Approve or reject signature
     Wallet-->>UI: Signature or rejection
     UI->>API: Submit exact message and signature
-    API->>DB: Atomically consume nonce
     API->>API: Validate SIWE fields and verify signature
+    API->>DB: Atomically consume nonce after signature verification
     API->>DB: Find or create profile; create session
     API-->>UI: Set HttpOnly session cookie
     UI-->>User: Show authenticated profile state
@@ -77,8 +77,8 @@ sequenceDiagram
 4. The server creates a cryptographically random nonce, stores it with a short expiry and unused status, and returns the SIWE fields needed by the client.
 5. The client builds a SIWE message from server-approved values and asks the wallet to sign it as a message. The UI explains that this signature signs in to BoilerMarket and does not submit a transaction.
 6. The client submits the exact message and signature to the server.
-7. The server parses and validates the SIWE message, atomically consumes the database nonce, and verifies the externally owned account signature for the supplied address and chain.
-8. On success, the server creates or finds the wallet profile, stores a hash of a random session ID in Supabase, and sets the raw ID in an HttpOnly cookie. The client refreshes its authenticated state from the server. Smart-contract wallet verification is follow-up work.
+7. The server parses and validates the SIWE message, verifies the signature for the supplied address and chain, and atomically consumes the database nonce. Externally owned accounts are verified cryptographically; deployed smart-contract wallets are verified through ERC-1271 using the configured chain RPC.
+8. On success, the server creates or finds the wallet profile, stores a hash of a random session ID in Supabase, and sets the raw ID in an HttpOnly cookie. The client refreshes its authenticated state from the server.
 
 ### Cancellation and errors
 
@@ -108,7 +108,7 @@ The initial implementation adds Next.js Route Handlers for challenge issuance, v
 | Operation | Proposed route | Responsibility |
 |---|---|---|
 | Issue challenge | `POST /api/auth/siwe/nonce` | Create a random, short-lived, single-use nonce and return the server-approved SIWE domain, URI, chain ID, and statement. |
-| Verify sign-in | `POST /api/auth/siwe/verify` | Validate the submitted message against the challenge, consume the nonce once, verify an EOA signature, find/create the wallet user, and issue a session cookie. |
+| Verify sign-in | `POST /api/auth/siwe/verify` | Validate the submitted message against the challenge, verify an EOA or ERC-1271 signature, consume the nonce once, find/create the wallet user, and issue a session cookie. |
 | Read session | `GET /api/auth/session` | Return the authenticated address for the current valid session. |
 | Sign out | `POST /api/auth/logout` | Revoke the session in Supabase and expire the cookie. |
 
@@ -165,7 +165,7 @@ The server must treat the submitted message as untrusted input and validate ever
 - Address in the SIWE message equals the address whose signature is being checked and, when the nonce request was bound to an address, equals that address too.
 - Nonce equals the outstanding, unused challenge and is within its expiry window.
 - Issued-at and optional expiration/not-before timestamps are valid and within allowed clock skew.
-- Signature verifies for the address. The initial implementation accepts 65-byte externally owned account signatures only; smart-contract wallet verification (ERC-1271) needs a chain-aware public client and RPC configuration.
+- Signature verifies for the address. Externally owned accounts use cryptographic signature recovery. Deployed smart-contract wallets use a chain-aware Viem public client and RPC configuration to verify ERC-1271 signatures.
 - Challenge consumption and session creation are protected against concurrent replay (transaction or atomic conditional update).
 
 The client should not be allowed to choose an arbitrary domain, URI, chain ID, statement, or nonce. The server constructs or validates those values against its own configuration.
@@ -191,16 +191,17 @@ Current environment/configuration values:
 - `NEXT_PUBLIC_APP_URL` — trusted canonical origin used for wallet metadata and SIWE domain/URI validation.
 - `SUPABASE_URL` — Supabase project URL used by the server routes.
 - `SUPABASE_SECRET_KEY` — server-only key for accessing the locked auth tables and `public.users`; never expose it to client code.
+- `SEPOLIA_RPC_URL` — server-only Sepolia JSON-RPC URL used to verify smart-contract wallet signatures; required by the verification route.
 - Sepolia (`11155111`) is currently configured in code as a provisional chain. Move this to an explicit allowlist configuration when the team confirms the target network.
-- Server RPC endpoint(s), if needed for future smart-contract wallet signature validation — server-only values. Session IDs are random and hashed in Supabase, so no `SESSION_SECRET` is needed.
+- Session IDs are random and hashed in Supabase, so no `SESSION_SECRET` is needed.
 
 Use the package manager and package versions already selected by the repository. Reown's current Next.js guide documents `@reown/appkit`, `@reown/appkit-adapter-wagmi`, Wagmi 2, Viem, and TanStack Query; it also describes cookie storage and SSR configuration to avoid hydration mismatches. Confirm the current stable package compatibility at implementation time instead of copying beta versions from an example.
 
 ## 10. Rollout plan
 
-1. **Repository and product decisions:** Supabase is the selected initial store, and Sepolia remains provisional pending product confirmation. Decide whether ERC-1271 contract-wallet support is required.
+1. **Repository and product decisions:** Supabase is the selected initial store, and Sepolia remains provisional pending product confirmation. ERC-1271 verification is implemented for the provisional chain.
 2. **Wallet connection:** implemented with AppKit/Wagmi for provisional Sepolia connection.
-3. **Challenge and signature flow:** implemented with server-issued SIWE challenges, wallet signing, server-side EOA verification, single-use nonce consumption in Supabase, and origin/domain/chain checks.
+3. **Challenge and signature flow:** implemented with server-issued SIWE challenges, wallet signing, server-side EOA and ERC-1271 verification, single-use nonce consumption in Supabase, and origin/domain/chain checks.
 4. **Session and profile mapping:** implemented with a hashed opaque session ID in Supabase, an HttpOnly cookie, and user rows keyed by normalized wallet address.
 5. **Product integration:** expose the signed-in wallet identity in the profile and ensure prediction creation can rely on the server-authenticated user identity.
 6. **Verification before merge:** verify desktop injected wallet and WalletConnect mobile/deep-link flows, sign-in and rejection cases, unsupported chain, invalid/expired/replayed challenge, page refresh, session expiry, wallet account change, logout, and unauthenticated access to protected operations.
@@ -210,7 +211,7 @@ Use the package manager and package versions already selected by the repository.
 - A user can connect an EVM wallet using WalletConnect on desktop/mobile or an available injected wallet.
 - A connected wallet remains unsigned-in until a SIWE signature is verified by the server.
 - The sign-in prompt clearly says it is for BoilerMarket authentication and does not trigger a transaction.
-- A valid 65-byte externally owned account signature for the configured Sepolia chain and current nonce creates or finds the `public.users` profile and a durable session in Supabase. Smart-contract wallet verification is not implemented yet.
+- A valid externally owned account signature or deployed ERC-1271 smart-contract wallet signature for the configured Sepolia chain and current nonce creates or finds the `public.users` profile and a durable session in Supabase.
 - Invalid, expired, wrong-domain, wrong-chain, wrong-address, or replayed messages do not create a session.
 - The session cookie persists across page refresh, is not readable by client JavaScript, and can be revoked by logout. Session records persist in Supabase.
 - Authenticated profile and prediction operations use the server session, not a client-supplied address.
@@ -220,7 +221,7 @@ Use the package manager and package versions already selected by the repository.
 
 - Which EVM chain should be supported for the initial project demo?
 - Should the app continue using the custom wallet session table or migrate to Supabase Auth after the initial prototype?
-- Is contract-wallet (ERC-1271) signature verification required for the first milestone?
+- Which deployed contract-wallet implementations should be included in the first wallet compatibility pass?
 - Should a wallet identity be the only account identifier initially, or should future email/social linking be anticipated in the profile model?
 
 ## 13. References
